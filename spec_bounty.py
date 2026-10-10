@@ -232,7 +232,7 @@ class SpecBounty(gl.Contract):
                 return False
         return True
 
-    @gl.public.write
+    @gl.public.write.payable
     def open_bounty(self, subject: str, fields: list, sources: list, rules: list,
                     min_sources: int, bar: int, collect_by: int, submit_by: int) -> str:
         if not isinstance(subject, str) or not subject.strip() or len(subject) > MAX_SUBJECT_LEN:

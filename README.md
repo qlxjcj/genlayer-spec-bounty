@@ -7,7 +7,7 @@ over those fields. Competitors submit the published values. The contract checks
 every claim against the pages **it fetched itself**, scores it, and pays the best
 submission — or nobody at all, in which case the purse goes home.
 
-Bradbury testnet: `0x45f8d81b9a982069B4071E7309b701cBc79F51C1`
+Bradbury testnet: `0x8ea27a35707D438225Eb1ee31E0F45271ce92471`
 
 ---
 
@@ -138,6 +138,57 @@ The direct-mode conftest installs two accounting hooks (payable debit to the
 contract, `emit_transfer` credit to the recipient) — without them the escrow
 assertions would be tautologies.
 
+## Live on chain
+
+The whole lifecycle was driven end to end on Bradbury from `0x6F33Ec…8959` with a
+**real 1 GEN purse**, against two real Wikipedia sources:
+
+```
+open_bounty   FINISHED_WITH_RETURN   purse 1000000000000000000 escrowed
+collect 0     FINISHED_WITH_RETURN   n_collected 0 -> 1
+collect 1     FINISHED_WITH_RETURN   n_collected 1 -> 2
+submit        FINISHED_WITH_RETURN   score 2  verdict PASS
+settle        FINISHED_WITH_RETURN   state SETTLED   payout 1000000000000000000
+```
+
+Both sources yielded `{"lang":"en","type":"standard"}` with `dropped=[]` — every
+extracted value was anchored verbatim in the page it came from. The submission
+the contract stored:
+
+```json
+{"values":  {"lang": "en", "type": "standard"},
+ "support": {"lang": 2, "type": 2},
+ "proven":  {"lang": true, "type": true},
+ "rules":   [{"field": "lang", "op": "==", "ref": "en", "result": "SATISFIED"}],
+ "score": 2, "verdict": "PASS", "note": "score 2/2 PASS"}
+```
+
+`support` shows each field carried by two independent sources; the rule engine
+resolved deterministically; the purse left the contract to the winner.
+
+The other exit is just as real. In an earlier run no submission was in when the
+window closed, and the contract refunded the full purse:
+
+```
+settle   FINISHED_WITH_RETURN   state REFUNDED   note "no submission"
+```
+
+Sixteen input-validation gates were also exercised live and every one of them
+reverted as designed:
+
+```
+zero purse · non-http source · min_sources below 2 · bar out of range
+rule on untracked field · unsupported operator · rule ref not numeric
+duplicate fields · collect/submit/settle/cancel on an unknown bounty
+duplicate registration · submit/collect on a settled bounty · settling twice
+```
+
+`collect` needs consensus to agree over a live web fetch plus a model extraction,
+which is where Bradbury intermittently answers `NOT_VOTED` / `TIMEOUT`; the calls
+above are the successful attempts. The extraction, corroboration, rule engine and
+payout are additionally covered by the 57 direct-mode tests with real balance
+assertions.
+
 ## Contract surface
 
 | Method | Kind | Purpose |
@@ -155,9 +206,20 @@ assertions would be tautologies.
 | `get_provider(addr)` | view | registration |
 | `get_bounty_count()` | view | counter |
 
-## Known limitation
+## Funding a purse from the command line
 
-The GenLayer CLI's `write` hardcodes `value: 0n`, so a purse cannot be funded
-from the command line. Funding and payout are exercised end to end in the test
-suite with real balance assertions; live funding would need `genlayer-js`
-`writeContract({value})` or Studio.
+The GenLayer CLI's `write` hardcodes `value: 0n`, so a purse cannot be attached
+through it. The contract is funded by sending the transaction directly through
+`genlayer-js`:
+
+```js
+const client = createClient({ chain: chains.testnetBradbury, endpoint: RPC,
+                              account: createAccount(privateKey) });
+const hash = await client.writeContract({ address, functionName: "open_bounty",
+                                          args: [...], value: 10n ** 18n });
+await client.waitForTransactionReceipt({ hash, retries: 100, interval: 5000 });
+```
+
+`open_bounty` is declared `@gl.public.write.payable`. That declaration is what
+makes an attached value legal — without it the same call reverts on chain while
+every direct-mode test still passes.

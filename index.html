@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpecBounty — Escrowed Spec Verification</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0 auto; max-width: 820px; padding: 2.5rem 1.25rem 4rem;
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1a1a1a; background: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6e6e6; background: #14161a; }
+    a { color: #7fb3ff; }
+    th { color: #c9d1d9; border-color: #30363d; }
+    td { border-color: #30363d; }
+    code { background: #21262d; }
+    .card { background: #1c2026; border-color: #30363d; }
+  }
+  h1 { font-size: 2rem; line-height: 1.25; margin: 0 0 .25rem; letter-spacing: -.02em; }
+  h2 { font-size: 1.25rem; margin: 2.75rem 0 .75rem; letter-spacing: -.01em; }
+  p { margin: .75rem 0; }
+  a { color: #0b63d6; }
+  .sub { color: #666; font-size: 1.05rem; margin-top: 0; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .875em;
+  }
+  code { background: #f2f3f5; padding: .12em .38em; border-radius: 4px; }
+  pre {
+    background: #f6f7f9; border: 1px solid #e2e4e8; border-radius: 8px;
+    padding: .9rem 1rem; overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .94rem; }
+  th, td { text-align: left; padding: .55rem .65rem; border-bottom: 1px solid #e2e4e8; vertical-align: top; }
+  th { font-weight: 600; }
+  .card {
+    border: 1px solid #e2e4e8; border-radius: 10px; padding: 1rem 1.15rem; margin: 1.25rem 0;
+    background: #fafbfc;
+  }
+  .addr { word-break: break-all; }
+  .muted { color: #777; font-size: .875rem; }
+  ul { padding-left: 1.25rem; }
+  li { margin: .35rem 0; }
+</style>
+</head>
+<body>
+
+<h1>SpecBounty</h1>
+<p class="sub">Escrowed spec verification. Proven, or refunded.</p>
+
+<div class="card">
+  <p><strong>Bradbury contract</strong><br>
+  <a class="addr" href="https://explorer-bradbury.genlayer.com/address/0x8ea27a35707D438225Eb1ee31E0F45271ce92471">0x8ea27a35707D438225Eb1ee31E0F45271ce92471</a></p>
+  <p class="muted">Source, tests and the full write-up live in the repository linked below.</p>
+</div>
+
+<h2>What it is</h2>
+<p>A purse is posted together with a requirement spec: named fields to read off a
+set of authoritative sources, and deterministic rules over those fields.
+Competitors submit the published values. The contract checks every claim against
+the pages <em>it fetched itself</em>, scores it, and pays the best submission &mdash;
+or nobody at all, in which case the purse goes home.</p>
+
+<h2>Why the answers cannot be invented</h2>
+<p>The model is asked one narrow question: <em>what does this page publish for each
+field?</em> Every answer must then occur <strong>verbatim in the page as a whole
+token</strong>.</p>
+
+<table>
+  <tr><th>page says</th><th>claimed</th><th>anchored?</th></tr>
+  <tr><td><code>1999</code></td><td><code>99</code></td><td>no &mdash; inside a longer number</td></tr>
+  <tr><td><code>50.00</code></td><td><code>50</code></td><td>no &mdash; inside a longer number</td></tr>
+  <tr><td><code>price: 50.</code></td><td><code>50</code></td><td>yes &mdash; the full stop is punctuation</td></tr>
+</table>
+
+<p>A value the page does not literally publish is dropped and never becomes
+evidence. Nothing else in the contract calls a model: corroboration, rules,
+verdict, winner and payout are all deterministic code.</p>
+
+<h2>The payout rule</h2>
+<p>A field counts only if at least <code>min_sources</code> <em>independent</em>
+sources publish that exact value. Rules over unproven fields resolve to
+<code>UNRESOLVED</code> rather than being guessed.</p>
+
+<table>
+  <tr><th>outcome</th><th>meaning</th></tr>
+  <tr><td><code>PASS</code></td><td>every rule satisfied</td></tr>
+  <tr><td><code>PARTIAL</code></td><td>some satisfied, none violated</td></tr>
+  <tr><td><code>FAIL</code></td><td>a rule violated</td></tr>
+  <tr><td><code>NOT_VERIFIABLE</code></td><td>nothing resolvable &mdash; never paid for</td></tr>
+</table>
+
+<p>Three exits, and every one of them moves real value:</p>
+<ul>
+  <li><code>cancel</code> &mdash; requester, before any submission</li>
+  <li><code>settle</code> &mdash; nobody cleared the bar &rarr; purse refunded</li>
+  <li><code>settle</code> &mdash; someone cleared the bar &rarr; that provider paid</li>
+</ul>
+<p>The contract cannot keep the purse.</p>
+
+<h2>Verified on chain</h2>
+<p>Run end to end on Bradbury with a real 1&nbsp;GEN purse against two real
+Wikipedia sources. The submission the contract stored:</p>
+
+<pre><code>{"values":  {"lang": "en", "type": "standard"},
+ "support": {"lang": 2, "type": 2},
+ "proven":  {"lang": true, "type": true},
+ "rules":   [{"field": "lang", "op": "==", "ref": "en", "result": "SATISFIED"}],
+ "score": 2, "verdict": "PASS", "note": "score 2/2 PASS"}</code></pre>
+
+<p><code>support</code> shows each field carried by two independent sources. The
+escrow, the corroboration, the rule engine and a real 1&nbsp;GEN payout are all
+visible in the transactions on the Explorer link above. An earlier run closed its
+window with no submission and refunded the full purse
+(<code>state: REFUNDED</code>, <code>note: "no submission"</code>).</p>
+
+<h2>Contract surface</h2>
+<table>
+  <tr><th>method</th><th>kind</th><th>purpose</th></tr>
+  <tr><td><code>open_bounty</code></td><td>write, payable</td><td>escrow a purse with a spec</td></tr>
+  <tr><td><code>register_provider</code></td><td>write</td><td>enter the competition</td></tr>
+  <tr><td><code>collect</code></td><td>write</td><td>fetch one source, extract, anchor it</td></tr>
+  <tr><td><code>submit</code></td><td>write</td><td>a competitor's claim; corroboration + rules</td></tr>
+  <tr><td><code>settle</code></td><td>write</td><td>deterministic winner, or refund</td></tr>
+  <tr><td><code>cancel</code></td><td>write</td><td>requester escape hatch, refund</td></tr>
+  <tr><td><code>get_bounty</code> / <code>get_source</code> / <code>get_submission</code></td><td>view</td><td>state, evidence, entries</td></tr>
+</table>
+
+<h2>How to verify</h2>
+<ol>
+  <li>Open the Bradbury Explorer link above and read <code>get_bounty(3)</code>.</li>
+  <li>Read <code>get_submission(3, 0x6F33Ec301a78D31BeEe47eeeAA5Db5cD4da78959)</code>.</li>
+  <li>Clone the repository and run <code>python -m pytest tests/direct -q</code>.</li>
+</ol>
+
+<p class="muted">57 direct-mode tests, every fund movement asserted against real balances.</p>
+
+</body>
+</html>

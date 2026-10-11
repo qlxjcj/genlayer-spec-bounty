@@ -217,6 +217,21 @@ above are the successful attempts. The extraction, corroboration, rule engine an
 payout are additionally covered by the 61 direct-mode tests with real balance
 assertions.
 
+### The frozen evidence set is enforced on chain
+
+The two gates that keep every provider on the same evidence were exercised live
+and both refused exactly as designed:
+
+```
+submit while collecting   -> FINISHED_WITH_ERROR   "Collection not final"
+collect after the freeze  -> FINISHED_WITH_ERROR   "Collection window closed"
+                                                        n_collected unchanged
+```
+
+That run closed its window with only one of two sources landing, so `submit`
+correctly refused for want of corroboration and `settle` refunded the purse —
+the fail-closed path, under the two-window lifecycle.
+
 ## Contract surface
 
 | Method | Kind | Purpose |

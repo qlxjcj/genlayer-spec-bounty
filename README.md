@@ -7,7 +7,7 @@ over those fields. Competitors submit the published values. The contract checks
 every claim against the pages **it fetched itself**, scores it, and pays the best
 submission — or nobody at all, in which case the purse goes home.
 
-Bradbury testnet: `0x8ea27a35707D438225Eb1ee31E0F45271ce92471`
+Bradbury testnet: `0x30b6Ff5107bB80DEa6D608CeB3BAf0ee88BB2638`
 
 ---
 
@@ -93,6 +93,34 @@ ways out, and every one of them moves real value:
 
 There is no way for the contract to keep the purse.
 
+## One finalised evidence set for everyone
+
+Scoring providers against whatever happens to be collected *at the moment they
+submit* would let an early submitter be judged on a thinner evidence set than a
+later one, and would leave early scores stale once more sources arrive. The
+lifecycle closes both doors.
+
+```
+collecting   now <  collect_by        collect() yes   submit() no
+submitting   collect_by <= now < submit_by   collect() no    submit() yes
+settling     submit_by <= now                     settle() yes
+```
+
+- `submit` is **refused while the collection window is open**, so nobody can be
+  scored against a half-collected evidence set. The evidence is frozen at
+  `collect_by`.
+- `collect` is **refused once that window shuts**, so the frozen set cannot
+  change afterwards.
+- `settle` **re-scores every entry from scratch** against that frozen set before
+  ranking, so all providers are ranked on identical evidence even if anything
+  upstream had changed.
+
+`tests/direct/test_spec_bounty.py` group **H** holds the regression tests:
+submitting during collection is refused, collecting after the freeze is refused,
+a later collection cannot stale an earlier submission, and two providers making
+the same claim at different moments come out with identical scores that
+settlement confirms.
+
 ## Validation before anything is stored
 
 - `subject`: required, length-bounded
@@ -114,7 +142,7 @@ There is no way for the contract to keep the purse.
 python -m pytest tests/direct -q
 ```
 
-57 direct-mode tests, every fund movement asserted against the VM balance ledger:
+61 direct-mode tests, every fund movement asserted against the VM balance ledger:
 
 - **creation**: blank/oversized subject, blank and duplicate fields, non-`http`
   and duplicate sources, `min_sources` bounds, `bar` bounds, rule field/operator/
@@ -186,7 +214,7 @@ duplicate registration · submit/collect on a settled bounty · settling twice
 `collect` needs consensus to agree over a live web fetch plus a model extraction,
 which is where Bradbury intermittently answers `NOT_VOTED` / `TIMEOUT`; the calls
 above are the successful attempts. The extraction, corroboration, rule engine and
-payout are additionally covered by the 57 direct-mode tests with real balance
+payout are additionally covered by the 61 direct-mode tests with real balance
 assertions.
 
 ## Contract surface

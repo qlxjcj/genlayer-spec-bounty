@@ -27,10 +27,8 @@ OPS = ("<=", ">=", "==", "!=")
 
 
 class SpecBounty(gl.Contract):
-    """A purse plus a requirement spec: fields to read off a set of sources and
-    deterministic rules over them. Competitors submit the published values; the
-    contract checks each claim against the sources it fetched itself and pays the
-    best one -- or nobody, in which case the purse goes home."""
+    """A purse plus a spec. Competitors submit the published values; the contract
+    checks each claim against the sources it fetched and pays the best, or refunds."""
 
     bounties: TreeMap[str, str]
     bodies: TreeMap[str, str]
@@ -148,7 +146,7 @@ class SpecBounty(gl.Contract):
         out = []
         for item in v:
             if not isinstance(item, str) or not item.strip():
-                raise gl.vm.UserError(what + " entries must be non-empty strings")
+                raise gl.vm.UserError(what + " entries must be non-empty")
             s = item.strip()
             if s in out:
                 raise gl.vm.UserError(what + " not unique: " + s)
@@ -163,16 +161,16 @@ class SpecBounty(gl.Contract):
         if not isinstance(v, list) or not v:
             raise gl.vm.UserError("rules must be a non-empty list")
         if len(v) > MAX_RULES:
-            raise gl.vm.UserError("rules exceeds " + str(MAX_RULES))
+            raise gl.vm.UserError("rules exceeds limit")
         out = []
         for r in v:
             if not isinstance(r, dict):
                 raise gl.vm.UserError("rule must be an object")
             f, op, ref = r.get("field", ""), r.get("op", ""), r.get("ref", "")
             if f not in fields:
-                raise gl.vm.UserError("rule field not tracked: " + str(f))
+                raise gl.vm.UserError("rule field not tracked")
             if op not in OPS:
-                raise gl.vm.UserError("unsupported op: " + str(op))
+                raise gl.vm.UserError("unsupported op")
             if not isinstance(ref, str) or not ref.strip() or len(ref) > MAX_VALUE_LEN:
                 raise gl.vm.UserError("rule ref invalid")
             ref = ref.strip()
@@ -183,164 +181,19 @@ class SpecBounty(gl.Contract):
 
     def _values(self, v, fields: list) -> dict:
         if not isinstance(v, dict) or set(v.keys()) != set(fields):
-            raise gl.vm.UserError("values must name exactly the tracked fields")
+            raise gl.vm.UserError("values must name the fields")
         out = {}
         for f in fields:
             val = v.get(f, "")
             if not isinstance(val, str) or len(val) > MAX_VALUE_LEN:
-                raise gl.vm.UserError("value for " + f + " invalid")
+                raise gl.vm.UserError("value invalid")
             out[f] = val.strip()
         return out
 
-    def _extract(self, url: str, fields: list) -> dict:
-        """The model's one narrow question: what does this page publish per field?
-        Every answer is then checked verbatim against the page text."""
-        def check() -> dict:
-            body = ""
-            try:
-                body = self._decode_body(gl.nondet.web.render(url))
-            except Exception:
-                body = ""
-            if not body.strip():
-                return {"retrieved": False, "body": "", "values": {}}
-            fmt = "{" + ", ".join('"' + f + '": "<value>"' for f in fields) + "}"
-            task = (
-                "Copy the published value of each FIELD from SOURCE exactly as written, "
-                'same digits and punctuation. Use "" when SOURCE does not state it. '
-                "JSON only.\nFIELDS: " + ", ".join(fields) + "\nSOURCE:\n" + body[:2500] + "\n" + fmt
-            )
-            result = gl.nondet.exec_prompt(task)
-            if isinstance(result, str):
-                result = json.loads(result.replace("```json", "").replace("```", ""))
-            if not isinstance(result, dict):
-                raise gl.vm.UserError("[LLM_ERROR] non-dict result")
-            return {"retrieved": True, "body": body, "values": result}
-
-        principle = "Equivalent if retrieved matches and every field carries the same published value."
-        return gl.eq_principle.prompt_comparative(check, principle)
-
-    def _extraction_ok(self, fields: list, ex: dict) -> bool:
-        if not isinstance(ex, dict) or not isinstance(ex.get("retrieved"), bool):
-            return False
-        if not isinstance(ex.get("body"), str):
-            return False
-        vals = ex.get("values")
-        if not isinstance(vals, dict) or set(vals.keys()) != set(fields):
-            return False
-        for v in vals.values():
-            if not isinstance(v, str) or len(v) > MAX_VALUE_LEN:
-                return False
-        return True
-
-    @gl.public.write.payable
-    def open_bounty(self, subject: str, fields: list, sources: list, rules: list,
-                    min_sources: int, bar: int, collect_by: int, submit_by: int) -> str:
-        if not isinstance(subject, str) or not subject.strip() or len(subject) > MAX_SUBJECT_LEN:
-            raise gl.vm.UserError("Subject required and short")
-        fields = self._str_list(fields, "fields", MAX_FIELDS)
-        sources = self._str_list(sources, "sources", MAX_SOURCES)
-        for u in sources:
-            if not u.startswith("http://") and not u.startswith("https://"):
-                raise gl.vm.UserError("sources must be http(s): " + u)
-        rules = self._rules(rules, fields)
-        if int(min_sources) < 2 or int(min_sources) > len(sources):
-            raise gl.vm.UserError("min_sources must be 2..source count")
-        if int(bar) < 1 or int(bar) > len(fields):
-            raise gl.vm.UserError("bar must be 1..field count")
-        now = self._now()
-        if int(collect_by) <= now or int(submit_by) <= int(collect_by):
-            raise gl.vm.UserError("need now < collect_by < submit_by")
-        purse = int(str(gl.message.value))
-        if purse <= 0:
-            raise gl.vm.UserError("A bounty must carry a purse")
-
-        self.bounty_count += 1
-        bid = str(self.bounty_count)
-        self.bounties[bid] = json.dumps({
-            "bounty_id": bid, "subject": subject.strip(),
-            "requester": self._addr_hex(gl.message.sender_address),
-            "fields": fields, "sources": sources, "rules": rules,
-            "min_sources": int(min_sources), "bar": int(bar), "purse": purse,
-            "collect_by": int(collect_by), "submit_by": int(submit_by),
-            "created_at": now, "state": OPEN, "n_collected": 0, "n_subs": 0,
-            "entrants": [], "winner": "", "payout": 0, "note": "", "settled_at": 0,
-        })
-        return bid
-
-    @gl.public.write
-    def register_provider(self) -> str:
-        who = self._addr_hex(gl.message.sender_address)
-        if who in self.providers:
-            raise gl.vm.UserError("Already registered")
-        self.providers[who] = json.dumps({"provider": who, "registered_at": self._now()})
-        return who
-
-    @gl.public.write
-    def collect(self, bounty_id: str, source_index: int) -> str:
-        """One fetch, one extraction. Values the page does not literally publish
-        are dropped here, never passed on as evidence."""
-        bid = str(bounty_id)
-        b = json.loads(self.bounties.get(bid, "{}"))
-        if not b:
-            raise gl.vm.UserError("Bounty not found")
-        if b["state"] != OPEN:
-            raise gl.vm.UserError("Bounty is closed")
-        if self._now() >= int(b["collect_by"]):
-            raise gl.vm.UserError("Collection window closed")
-        idx = int(source_index)
-        if idx < 0 or idx >= len(b["sources"]):
-            raise gl.vm.UserError("source_index out of range")
-        if self.bodies.get(bid + "|" + str(idx), ""):
-            raise gl.vm.UserError("Source already collected")
-
-        ex = self._extract(b["sources"][idx], b["fields"])
-        if not self._extraction_ok(b["fields"], ex):
-            raise gl.vm.UserError("Invalid extraction: field set or value types wrong")
-        if not ex.get("retrieved"):
-            raise gl.vm.UserError("Source could not be retrieved")
-
-        body = ex["body"][:MAX_BODY_CHARS]
-        values = {}
-        for f in b["fields"]:
-            v = ex["values"].get(f, "")
-            if v and self._anchored(body, v):
-                values[f] = v
-
-        self.bodies[bid + "|" + str(idx)] = json.dumps({
-            "bounty_id": bid, "source_index": idx, "url": b["sources"][idx],
-            "body": body, "fetched_at": self._now(),
-        })
-        self.extracts[bid + "|" + str(idx)] = json.dumps({
-            "bounty_id": bid, "source_index": idx, "values": values,
-            "dropped": [f for f in b["fields"] if f not in values],
-        })
-        b["n_collected"] = int(b["n_collected"]) + 1
-        self.bounties[bid] = json.dumps(b)
-        return json.dumps(values)
-
-    @gl.public.write
-    def submit(self, bounty_id: str, values: dict) -> str:
-        """Nothing is taken on trust: a field counts only if enough independent
-        sources publish that exact value, and the rules are applied to survivors."""
-        bid = str(bounty_id)
-        b = json.loads(self.bounties.get(bid, "{}"))
-        if not b:
-            raise gl.vm.UserError("Bounty not found")
-        if b["state"] != OPEN:
-            raise gl.vm.UserError("Bounty is closed")
-        if self._now() >= int(b["submit_by"]):
-            raise gl.vm.UserError("Submission window closed")
-        who = self._addr_hex(gl.message.sender_address)
-        if who not in self.providers:
-            raise gl.vm.UserError("Only registered providers may submit")
-        if self.subs.get(bid + "|" + who, ""):
-            raise gl.vm.UserError("Already submitted")
-        if int(b["n_collected"]) < int(b["min_sources"]):
-            raise gl.vm.UserError("Not enough sources collected yet")
-
-        vals = self._values(values, b["fields"])
+    def _score(self, b: dict, vals: dict) -> dict:
+        """Score one claim against the evidence, at submission and again at settlement."""
         need = int(b["min_sources"])
-
+        bid = str(b["bounty_id"])
         proven, support = {}, {}
         for f in b["fields"]:
             v = vals[f]
@@ -376,23 +229,163 @@ class SpecBounty(gl.Contract):
             verdict = V_PARTIAL
         else:
             verdict = V_NONE
+        return {"support": support, "proven": proven, "rules": results,
+                "score": sum(1 for x in proven.values() if x), "verdict": verdict}
 
-        score = sum(1 for x in proven.values() if x)
-        idx = int(b["n_subs"]) + 1
-        self.subs[bid + "|" + who] = json.dumps({
-            "bounty_id": bid, "index": idx, "provider": who, "values": vals,
-            "support": support, "proven": proven, "rules": results,
-            "score": score, "verdict": verdict, "submitted_at": self._now(),
+    def _extract(self, url: str, fields: list) -> dict:
+        """The model's one narrow question: what does this page publish per field?"""
+        def check() -> dict:
+            body = ""
+            try:
+                body = self._decode_body(gl.nondet.web.render(url))
+            except Exception:
+                body = ""
+            if not body.strip():
+                return {"retrieved": False, "body": "", "values": {}}
+            fmt = "{" + ", ".join('"' + f + '": "<value>"' for f in fields) + "}"
+            task = (
+                "Copy each FIELD's published value from SOURCE exactly as written. "
+                'Use "" if unstated. JSON only.\nFIELDS: '
+                + ", ".join(fields) + "\nSOURCE:\n" + body[:2500] + "\n" + fmt
+            )
+            result = gl.nondet.exec_prompt(task)
+            if isinstance(result, str):
+                result = json.loads(result.replace("```json", "").replace("```", ""))
+            if not isinstance(result, dict):
+                raise gl.vm.UserError("[LLM_ERROR] non-dict result")
+            return {"retrieved": True, "body": body, "values": result}
+
+        principle = "Equivalent if retrieved and every field matches."
+        return gl.eq_principle.prompt_comparative(check, principle)
+
+    def _extraction_ok(self, fields: list, ex: dict) -> bool:
+        vals = ex.get("values") if isinstance(ex, dict) else None
+        return (isinstance(ex.get("retrieved"), bool) and isinstance(ex.get("body"), str)
+                and isinstance(vals, dict) and set(vals.keys()) == set(fields)
+                and all(isinstance(v, str) and len(v) <= MAX_VALUE_LEN for v in vals.values()))
+
+    @gl.public.write.payable
+    def open_bounty(self, subject: str, fields: list, sources: list, rules: list,
+                    min_sources: int, bar: int, collect_by: int, submit_by: int) -> str:
+        if not isinstance(subject, str) or not subject.strip() or len(subject) > MAX_SUBJECT_LEN:
+            raise gl.vm.UserError("Subject required")
+        fields = self._str_list(fields, "fields", MAX_FIELDS)
+        sources = self._str_list(sources, "sources", MAX_SOURCES)
+        for u in sources:
+            if not u.startswith("http://") and not u.startswith("https://"):
+                raise gl.vm.UserError("sources must be http(s)")
+        rules = self._rules(rules, fields)
+        if int(min_sources) < 2 or int(min_sources) > len(sources):
+            raise gl.vm.UserError("min_sources must be 2..sources")
+        if int(bar) < 1 or int(bar) > len(fields):
+            raise gl.vm.UserError("bar must be 1..fields")
+        now = self._now()
+        if int(collect_by) <= now or int(submit_by) <= int(collect_by):
+            raise gl.vm.UserError("need now < collect_by < submit_by")
+        purse = int(str(gl.message.value))
+        if purse <= 0:
+            raise gl.vm.UserError("A bounty must carry a purse")
+
+        self.bounty_count += 1
+        bid = str(self.bounty_count)
+        self.bounties[bid] = json.dumps({
+            "bounty_id": bid, "subject": subject.strip(),
+            "requester": self._addr_hex(gl.message.sender_address),
+            "fields": fields, "sources": sources, "rules": rules,
+            "min_sources": int(min_sources), "bar": int(bar), "purse": purse,
+            "collect_by": int(collect_by), "submit_by": int(submit_by),
+            "created_at": now, "state": OPEN, "n_collected": 0, "n_subs": 0,
+            "entrants": [], "winner": "", "payout": 0, "note": "", "settled_at": 0,
         })
+        return bid
+
+    @gl.public.write
+    def register_provider(self) -> str:
+        who = self._addr_hex(gl.message.sender_address)
+        if who in self.providers:
+            raise gl.vm.UserError("Already registered")
+        self.providers[who] = json.dumps({"provider": who, "registered_at": self._now()})
+        return who
+
+    @gl.public.write
+    def collect(self, bounty_id: str, source_index: int) -> str:
+        """One fetch, one extraction. Values not literally published are dropped."""
+        bid = str(bounty_id)
+        b = json.loads(self.bounties.get(bid, "{}"))
+        if not b:
+            raise gl.vm.UserError("Bounty not found")
+        if b["state"] != OPEN:
+            raise gl.vm.UserError("Bounty is closed")
+        if self._now() >= int(b["collect_by"]):
+            raise gl.vm.UserError("Collection window closed")
+        idx = int(source_index)
+        if idx < 0 or idx >= len(b["sources"]):
+            raise gl.vm.UserError("source_index out of range")
+        if self.bodies.get(bid + "|" + str(idx), ""):
+            raise gl.vm.UserError("Source already collected")
+
+        ex = self._extract(b["sources"][idx], b["fields"])
+        if not self._extraction_ok(b["fields"], ex):
+            raise gl.vm.UserError("Invalid extraction")
+        if not ex.get("retrieved"):
+            raise gl.vm.UserError("Source could not be retrieved")
+
+        body = ex["body"][:MAX_BODY_CHARS]
+        values = {}
+        for f in b["fields"]:
+            v = ex["values"].get(f, "")
+            if v and self._anchored(body, v):
+                values[f] = v
+
+        self.bodies[bid + "|" + str(idx)] = json.dumps({
+            "bounty_id": bid, "source_index": idx, "url": b["sources"][idx],
+            "body": body, "fetched_at": self._now(),
+        })
+        self.extracts[bid + "|" + str(idx)] = json.dumps({
+            "bounty_id": bid, "source_index": idx, "values": values,
+            "dropped": [f for f in b["fields"] if f not in values],
+        })
+        b["n_collected"] = int(b["n_collected"]) + 1
+        self.bounties[bid] = json.dumps(b)
+        return json.dumps(values)
+
+    @gl.public.write
+    def submit(self, bounty_id: str, values: dict) -> str:
+        """A field counts only if enough independent sources publish that exact value."""
+        bid = str(bounty_id)
+        b = json.loads(self.bounties.get(bid, "{}"))
+        if not b:
+            raise gl.vm.UserError("Bounty not found")
+        if b["state"] != OPEN:
+            raise gl.vm.UserError("Bounty is closed")
+        now = self._now()
+        if now < int(b["collect_by"]):
+            raise gl.vm.UserError("Collection not final")
+        if now >= int(b["submit_by"]):
+            raise gl.vm.UserError("Submission window closed")
+        who = self._addr_hex(gl.message.sender_address)
+        if who not in self.providers:
+            raise gl.vm.UserError("Only registered providers")
+        if self.subs.get(bid + "|" + who, ""):
+            raise gl.vm.UserError("Already submitted")
+        if int(b["n_collected"]) < int(b["min_sources"]):
+            raise gl.vm.UserError("Not enough sources collected")
+
+        vals = self._values(values, b["fields"])
+        sc = self._score(b, vals)
+        idx = int(b["n_subs"]) + 1
+        rec = {"bounty_id": bid, "index": idx, "provider": who, "values": vals,
+               "submitted_at": self._now()}
+        rec.update(sc)
+        self.subs[bid + "|" + who] = json.dumps(rec)
         b["n_subs"] = idx
         b["entrants"] = b.get("entrants", []) + [who]
         self.bounties[bid] = json.dumps(b)
-        return json.dumps({"score": score, "verdict": verdict})
+        return json.dumps({"score": sc["score"], "verdict": sc["verdict"]})
 
     @gl.public.write
     def settle(self, bounty_id: str) -> str:
-        """Deterministic. The purse is paid only to a submission that proved enough
-        fields from verifiable evidence. Otherwise it goes home."""
+        """Paid only to a submission that proved enough fields. Otherwise: refund."""
         bid = str(bounty_id)
         b = json.loads(self.bounties.get(bid, "{}"))
         if not b:
@@ -403,7 +396,15 @@ class SpecBounty(gl.Contract):
             raise gl.vm.UserError("Submission window still open")
 
         purse = int(b["purse"])
-        entrants = [json.loads(self.subs[bid + "|" + who]) for who in b.get("entrants", [])]
+        entrants = []
+        for who in b.get("entrants", []):
+            s = json.loads(self.subs[bid + "|" + who])
+            # Re-score against the frozen evidence set before ranking. This is
+            # what makes every provider compete on identical evidence even if
+            # anything upstream ever changed.
+            s.update(self._score(b, s["values"]))
+            self.subs[bid + "|" + who] = json.dumps(s)
+            entrants.append(s)
         eligible = [s for s in entrants
                     if s["verdict"] in (V_PASS, V_PARTIAL) and int(s["score"]) >= int(b["bar"])]
         b["settled_at"] = self._now()
@@ -437,7 +438,7 @@ class SpecBounty(gl.Contract):
         if self._addr_hex(gl.message.sender_address).lower() != str(b["requester"]).lower():
             raise gl.vm.UserError("Only the requester can cancel")
         if int(b["n_subs"]) > 0:
-            raise gl.vm.UserError("Cannot cancel once a submission is in")
+            raise gl.vm.UserError("Cannot cancel with a submission")
         if self._now() >= int(b["submit_by"]):
             raise gl.vm.UserError("Submission window closed")
         b["state"] = CANCELLED

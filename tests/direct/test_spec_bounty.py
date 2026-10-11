@@ -34,7 +34,16 @@ def collect_and_register(vm, c, bid, indices=(0, 1, 2), providers=(PROVIDER_A,))
     collect_all(vm, c, bid, indices)
     for who in providers:
         register(vm, c, who)
+    vm.warp(T_MID)      # collection is final now; submissions may begin
     return bid
+
+
+def submit_claim(vm, c, bid, who, values):
+    """Submit inside the submission window. Collection is closed by then, so
+    every claim is scored against the same finalised evidence."""
+    vm.warp(T_MID)
+    vm.sender = who
+    return c.submit(bid, values)
 
 
 # ---------------------------------------------------------------- A: creation
@@ -164,6 +173,7 @@ def test_unregistered_provider_cannot_submit(bounty):
     vm, c = bounty
     bid = open_bounty(vm, c)
     collect_all(vm, c, bid)
+    vm.warp(T_MID)
     vm.sender = STRANGER
     with pytest.raises(Exception):
         c.submit(bid, {"rate_limit": "10000", "price": "50"})
@@ -292,6 +302,7 @@ def test_submit_before_enough_sources_rejected(bounty):
     register(vm, c, PROVIDER_A)
     vm.sender = PROVIDER_A
     c.collect(bid, 0)
+    vm.warp(T_MID)
     with pytest.raises(Exception):
         c.submit(bid, {"rate_limit": "10000", "price": "50"})
 
@@ -382,6 +393,7 @@ def test_unverifiable_evidence_cannot_score(bounty):
     bid = open_bounty(vm, c, sources=[URL_A, URL_B, URL_TRAP])
     collect_all(vm, c, bid)
     register(vm, c, PROVIDER_A)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_A
     res = json.loads(c.submit(bid, {"rate_limit": "99", "price": "50"}))
     assert res["score"] == 1
@@ -441,6 +453,7 @@ def test_nobody_clearing_the_bar_refunds(bounty):
     bid = open_bounty(vm, c, bar=2)
     collect_all(vm, c, bid)
     register(vm, c, PROVIDER_A)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_A
     c.submit(bid, {"rate_limit": "10000", "price": "60"})   # score 1 < bar 2
     vm.warp(T_END)
@@ -476,6 +489,7 @@ def test_ties_go_to_the_earliest_submission(bounty):
     collect_all(vm, c, bid)
     register(vm, c, PROVIDER_A)
     register(vm, c, PROVIDER_B)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_A
     c.submit(bid, {"rate_limit": "10000", "price": "50"})
     vm.sender = PROVIDER_B
@@ -491,6 +505,7 @@ def test_higher_score_beats_an_earlier_entry(bounty):
     collect_all(vm, c, bid)
     register(vm, c, PROVIDER_A)
     register(vm, c, PROVIDER_B)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_A
     c.submit(bid, {"rate_limit": "10000", "price": "60"})   # score 1
     vm.sender = PROVIDER_B
@@ -523,6 +538,7 @@ def test_unverifiable_finding_is_never_paid_for(bounty):
     vm.mock_llm(".*SPEC-Q3.*", json.dumps({"rate_limit": "unlimited", "price": "free"}))
     collect_all(vm, c, bid)
     register(vm, c, PROVIDER_A)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_A
     res = json.loads(c.submit(bid, {"rate_limit": "unlimited", "price": "free"}))
     assert res == {"score": 2, "verdict": "NOT_VERIFIABLE"}
@@ -600,6 +616,7 @@ def test_submissions_are_returned_in_order(bounty):
     collect_all(vm, c, bid)
     for who in (PROVIDER_A, PROVIDER_B, PROVIDER_C):
         register(vm, c, who)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_B
     c.submit(bid, {"rate_limit": "10000", "price": "50"})
     vm.sender = PROVIDER_C
@@ -628,6 +645,7 @@ def test_real_provider_lifecycle_end_to_end(bounty):
     assert json.loads(c.get_bounty(bid))["n_collected"] == 3
     for who in (PROVIDER_A, PROVIDER_B):
         register(vm, c, who)
+    vm.warp(T_MID)
     vm.sender = PROVIDER_A
     c.submit(bid, {"rate_limit": "10000", "price": "50"})
     vm.sender = PROVIDER_B
@@ -637,3 +655,88 @@ def test_real_provider_lifecycle_end_to_end(bounty):
     assert out["winner"] == PROVIDER_A
     assert cbal(vm) == 0
     assert json.loads(c.get_bounty(bid))["state"] == "SETTLED"
+
+
+# ------------------------------- H: one finalised evidence set for everyone
+
+
+def test_submit_is_refused_while_collection_is_open(bounty):
+    """A provider must not be scored against a half-collected evidence set."""
+    vm, c = bounty
+    bid = open_bounty(vm, c)
+    collect_all(vm, c, bid)
+    register(vm, c, PROVIDER_A)
+    vm.sender = PROVIDER_A
+    with pytest.raises(Exception):
+        c.submit(bid, {"rate_limit": "10000", "price": "50"})
+    assert json.loads(c.get_submission(bid, PROVIDER_A)) == {}
+
+
+def test_collection_cannot_change_after_the_freeze(bounty):
+    """Once the collection window shuts, the evidence set is final."""
+    vm, c = bounty
+    bid = open_bounty(vm, c)
+    vm.warp(T_MID)
+    vm.sender = PROVIDER_A
+    with pytest.raises(Exception):
+        c.collect(bid, 0)
+    assert json.loads(c.get_bounty(bid))["n_collected"] == 0
+
+
+def test_later_collection_cannot_stale_an_earlier_submission(bounty):
+    """The regression the steward asked for. A claim is accepted only after
+    collection has closed, and settlement re-scores from scratch, so a later
+    collection can never leave an earlier submission with a stale score."""
+    vm, c = bounty
+    bid = open_bounty(vm, c)                       # 3 sources, min_sources 2
+    collect_all(vm, c, bid, indices=(0, 1))        # only two of three collected
+    register(vm, c, PROVIDER_A)
+    register(vm, c, PROVIDER_B)
+
+    vm.warp(T_MID)                                 # evidence frozen here
+    vm.sender = PROVIDER_A
+    res = json.loads(c.submit(bid, {"rate_limit": "10000", "price": "50"}))
+    assert res == {"score": 2, "verdict": "PASS"}
+
+    # the exact scenario: someone tries to add the third source afterwards
+    vm.sender = PROVIDER_B
+    with pytest.raises(Exception):
+        c.collect(bid, 2)
+    assert json.loads(c.get_bounty(bid))["n_collected"] == 2
+
+    vm.warp(T_END)
+    c.settle(bid)
+    stored = json.loads(c.get_submission(bid, PROVIDER_A))
+    assert stored["score"] == 2 and stored["verdict"] == "PASS"
+    assert stored["support"] == {"rate_limit": 2, "price": 2}
+    assert json.loads(c.get_bounty(bid))["note"] == "score 2/2 PASS"
+
+
+def test_every_entry_is_rescored_against_the_same_frozen_evidence(bounty):
+    """Two providers, the same claim, submitted at different moments: identical
+    scores, and settlement confirms both against the finalised evidence."""
+    vm, c = bounty
+    bid = open_bounty(vm, c)
+    collect_all(vm, c, bid)
+    register(vm, c, PROVIDER_A)
+    register(vm, c, PROVIDER_B)
+    vm.warp(T_MID)
+    vm.sender = PROVIDER_A
+    c.submit(bid, {"rate_limit": "10000", "price": "50"})
+    vm.sender = PROVIDER_B
+    c.submit(bid, {"rate_limit": "10000", "price": "50"})
+
+    first = json.loads(c.get_submission(bid, PROVIDER_A))
+    second = json.loads(c.get_submission(bid, PROVIDER_B))
+    assert first["score"] == second["score"] == 2
+    assert first["support"] == second["support"]
+    assert first["proven"] == second["proven"]
+    assert first["rules"] == second["rules"]
+
+    vm.warp(T_END)
+    out = json.loads(c.settle(bid))
+    assert out["winner"] == PROVIDER_A            # tie goes to the earliest
+    assert out["payout"] == PURSE
+    # settlement re-scored everyone, so the stored numbers still hold
+    assert json.loads(c.get_submission(bid, PROVIDER_A))["score"] == 2
+    assert json.loads(c.get_submission(bid, PROVIDER_B))["score"] == 2
